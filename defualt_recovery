@@ -1,0 +1,35 @@
+Feature: Default recovery strategy for unhandled states
+  As a system administrator
+  I want a fallback strategy for orders in unexpected states
+  So that the system can handle all possible scenarios during recovery
+
+  Background:
+    Given the system is in recovery mode
+    And the transaction logs are available
+
+  Scenario: Order with unknown state uses default strategy
+    Given an order with ID "ORD-UNKNOWN" exists in transaction logs
+    And the order has state "UnknownState" in RECALL/TICKET/HISTORY topic
+    When the recovery process runs for this order
+    Then the DefaultRecoveryStrategy should handle the order
+    And the recovery action should be REBUILD with warning about unknown state
+    And the order should be rebuilt in the cache with state "UnknownState"
+
+  Scenario: Order with missing transaction history is handled by default strategy
+    Given an order with ID "ORD-MISSING" exists in transaction logs
+    And the order has state "MissingState" in RECALL/TICKET/HISTORY topic
+    And the order has state "SomeOtherState" in RECALL/TO/OMS topic
+    When the recovery process runs for this order
+    Then the DefaultRecoveryStrategy should handle the order
+    And the recovery action should be REBUILD with warning about unknown state
+    And the order should be rebuilt in the cache with state "MissingState"
+
+  Scenario: Order with custom state not handled by other strategies
+    Given an order with ID "ORD-CUSTOM" exists in transaction logs
+    And the order has state "CustomState" in RECALL/TICKET/HISTORY topic
+    And the order has state "CustomState" in RECALL/TO/OMS topic
+    And the order has state "CustomState" in OMS/TO/RECALL topic 
+    When the recovery process runs for this order
+    Then the DefaultRecoveryStrategy should handle the order
+    And the recovery action should be REBUILD with warning about unknown state
+    And the order should be rebuilt in the cache with state "CustomState"
