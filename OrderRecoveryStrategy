@@ -1,0 +1,100 @@
+public class OrderRecoveryStrategy {
+    private static final Logger LOGGER = LoggerFactory.getLogger(OrderRecoveryStrategy.class);
+    
+    /**
+     * Determines the appropriate recovery action for the given context.
+     * 
+     * @param context The recovery context
+     * @return The recovery action to take
+     */
+    public RecoveryActionType determineAction(RecoveryContext context) {
+        String orderId = context.getOrderId();
+        Order rebuiltOrder = context.getRebuiltOrder();
+        RecallTicket ticket = context.getTicket();
+        
+        // If we couldn't rebuild the order or ticket is missing, we need to log and ignore
+        if (rebuiltOrder == null || ticket == null) {
+            LOGGER.warn("Unable to rebuild order {} or missing ticket - ignoring during recovery", orderId);
+            return RecoveryActionType.IGNORE;
+        }
+        
+        // Get states for comparison
+        OrderState orderState = rebuiltOrder.getCurrentState();
+        String ticketState = ticket.getCurrentState();
+        
+        LOGGER.info("Comparing states for order {}: Order state={}, Ticket state={}", 
+            orderId, orderState, ticketState);
+        
+        // Check if states are considered equivalent based on special rules
+        if (areStatesEquivalent(orderState, ticketState)) {
+            LOGGER.info("States are considered equivalent for order {} - rebuilding", orderId);
+            return RecoveryActionType.REBUILD;
+        } else {
+            LOGGER.info("States mismatch for order {}: Order state={}, Ticket state={} - republishing", 
+                orderId, orderState, ticketState);
+            return RecoveryActionType.REPUBLISH;
+        }
+    }
+    
+    /**
+     * Checks if order state and ticket state are considered equivalent.
+     * 
+     * @param orderState The order state
+     * @param ticketState The ticket state
+     * @return true if states are equivalent, false otherwise
+     */
+    private boolean areStatesEquivalent(OrderState orderState, String ticketState) {
+        // If states are exactly equal, they're equivalent
+        if (orderState.toString().equals(ticketState)) {
+            return true;
+        }
+        
+        // Special case: New and Created are equivalent
+        if (OrderState.New.equals(orderState) && "Created".equals(ticketState)) {
+            return true;
+        }
+        
+        // Special case: DoneForDay is equivalent to Canceled, Filled, or PartiallyFilled
+        if (OrderState.DoneOfDay.equals(orderState) && 
+            ("Canceled".equals(ticketState) || 
+             "Filled".equals(ticketState) || 
+             "PartiallyFilled".equals(ticketState))) {
+            return true;
+        }
+        
+        // States are not equivalent
+        return false;
+    }
+    
+    /**
+     * Provides a description of why a particular action was chosen.
+     * 
+     * @param context The recovery context
+     * @param action The action that was determined
+     * @return A human-readable description of the reasoning
+     */
+    public String getActionReason(RecoveryContext context, RecoveryActionType action) {
+        Order rebuiltOrder = context.getRebuiltOrder();
+        RecallTicket ticket = context.getTicket();
+        
+        if (rebuiltOrder == null || ticket == null) {
+            return "Order could not be rebuilt or ticket is missing";
+        }
+        
+        OrderState orderState = rebuiltOrder.getCurrentState();
+        String ticketState = ticket.getCurrentState();
+        
+        switch (action) {
+            case REBUILD:
+                return String.format("States are equivalent: Order state=%s, Ticket state=%s", 
+                    orderState, ticketState);
+            case REPUBLISH:
+                return String.format("States mismatch: Order state=%s, Ticket state=%s", 
+                    orderState, ticketState);
+            case IGNORE:
+                return "Processing is not needed for this order";
+            default:
+                return "Unknown reason";
+        }
+    }
+}
