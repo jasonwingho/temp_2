@@ -1,0 +1,220 @@
+
+
+/**
+ * Enhanced MessageParser that handles JSON with metadata for JSON type messages,
+ * while preserving original behavior for NVFIX messages.
+ */
+public class MessageParser<T extends FieldMappable> implements TypedBinder<T> {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(MessageParser.class);
+    
+    private final MessageType messageType;
+    private final static ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
+    private final Class<T> messageClass;
+    private final KeyValueMarker keyValueMarker = new KeyValueMarker();
+    
+    // SOH character (ASCII 1, \u0001) used in NVFIX format
+    private static final char SOH = '\u0001';
+
+    public MessageParser(MessageType messageType, Class<T> classType) {
+        this.messageType = messageType;
+        this.messageClass = classType;
+    }
+
+    public String toString(T obj) {
+        switch (messageType) {
+            case JSON:
+                try {
+                    return objectMapper.writeValueAsString(obj);
+                } catch (JsonProcessingException e) {
+                    return "{}";
+                }
+            case NVFIX:
+                FieldMapper fieldMapper = obj.getFieldMapper();
+                if (fieldMapper == null) {
+                    throw new ParsingErrorException("Unable to get FieldMapper for " + messageClass.getName());
+                }
+                return obj.getFieldMapper().generateFixMessage(obj, null);
+            default:
+                throw new IllegalArgumentException(String.format("Unknown message type [%s] for formatting map into string", messageType));
+        }
+    }
+
+    public T parse(String message) {
+        switch (messageType) {
+            case JSON:
+                try {
+                    // Check if this is a hybrid format (JSON + SOH metadata)
+                    if (isHybridFormat(message)) {
+                        return parseHybridFormat(message);
+                    } else {
+                        // Regular JSON parsing
+                        objectMapper.registerModule(new JavaTimeModule());
+                        return objectMapper.readValue(message, messageClass);
+                    }
+                } catch (IOException e) {
+                    LOGGER.error("Error parsing JSON message: {}", e.getMessage());
+                    throw new ParsingErrorException(message);
+                }
+            case NVFIX:
+                // Keep existing NVFIX parsing logic unchanged
+                return parseNVFIX(message);
+            default:
+                throw new IllegalArgumentException(String.format("Unknown message type [%s] for parsing string into map", messageType));
+        }
+    }
+    
+    /**
+     * Checks if a message is in hybrid format (JSON + SOH-delimited key=value pairs)
+     */
+    private boolean isHybridFormat(String message) {
+        return message.startsWith("{") && message.indexOf(SOH) > 0;
+    }
+    
+    /**
+     * Parses a message in hybrid format: JSON followed by SOH-delimited key=value pairs
+     */
+    private T parseHybridFormat(String message) throws IOException {
+        // Find the end of the JSON part
+        int jsonEndIndex = findJsonEndIndex(message);
+        if (jsonEndIndex == -1) {
+            throw new ParsingErrorException("Could not find valid JSON object in message");
+        }
+        
+        // Extract the JSON part
+        String jsonPart = message.substring(0, jsonEndIndex + 1);
+        
+        // Parse the JSON part to a JsonNode
+        JsonNode rootNode = objectMapper.readTree(jsonPart);
+        
+        // If there's anything after the JSON part, parse as key=value pairs
+        if (jsonEndIndex < message.length() - 1) {
+            String metadataPart = message.substring(jsonEndIndex + 1);
+            Map<String, String> metadata = parseKeyValuePairs(metadataPart);
+            
+            // Add metadata fields to the JSON
+            ObjectNode objectNode = (ObjectNode) rootNode;
+            for (Map.Entry<String, String> entry : metadata.entrySet()) {
+                // Try to convert numeric values appropriately
+                String value = entry.getValue();
+                if (value.matches("\\d+")) {
+                    try {
+                        objectNode.put(entry.getKey().toLowerCase(), Long.parseLong(value));
+                    } catch (NumberFormatException e) {
+                        objectNode.put(entry.getKey().toLowerCase(), value);
+                    }
+                } else if (value.matches("\\d+\\.\\d+")) {
+                    try {
+                        objectNode.put(entry.getKey().toLowerCase(), Double.parseDouble(value));
+                    } catch (NumberFormatException e) {
+                        objectNode.put(entry.getKey().toLowerCase(), value);
+                    }
+                } else {
+                    objectNode.put(entry.getKey().toLowerCase(), value);
+                }
+            }
+        }
+        
+        // Convert the enriched JsonNode to the target class
+        return objectMapper.treeToValue(rootNode, messageClass);
+    }
+    
+    /**
+     * Finds the index of the closing brace of the JSON object.
+     */
+    private int findJsonEndIndex(String message) {
+        int braceCount = 0;
+        boolean inQuotes = false;
+        boolean escaped = false;
+        
+        for (int i = 0; i < message.length(); i++) {
+            char c = message.charAt(i);
+            
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+            
+            if (c == '"') {
+                inQuotes = !inQuotes;
+            }
+            
+            if (!inQuotes) {
+                if (c == '{') {
+                    braceCount++;
+                } else if (c == '}') {
+                    braceCount--;
+                    if (braceCount == 0) {
+                        return i;
+                    }
+                }
+            }
+        }
+        
+        return -1;
+    }
+    
+    /**
+     * Parses SOH-delimited key=value pairs into a map.
+     */
+    private Map<String, String> parseKeyValuePairs(String metadataPart) {
+        Map<String, String> metadata = new HashMap<>();
+        
+        // Split by SOH character
+        String[] pairs = metadataPart.split(String.valueOf(SOH));
+        
+        for (String pair : pairs) {
+            // Skip empty pairs
+            if (pair.isEmpty()) continue;
+            
+            // Split key=value
+            int equalPos = pair.indexOf('=');
+            if (equalPos > 0) {
+                String key = pair.substring(0, equalPos);
+                String value = pair.substring(equalPos + 1);
+                metadata.put(key, value);
+            }
+        }
+        
+        return metadata;
+    }
+
+    private T parseNVFIX(String message) {
+        T target;
+        
+        try {
+            target = messageClass.getDeclaredConstructor().newInstance();
+        } catch (InvocationTargetException | InstantiationException | IllegalAccessException | NoSuchMethodException e) {
+            LOGGER.error("Error creating instance of " + messageClass.getName(), e);
+            throw new ParsingErrorException(message);
+        }
+
+        FieldMapper fieldMapper = target.getFieldMapper();
+        if (fieldMapper == null) {
+            throw new ParsingErrorException("Unable to get FieldMapper for " + messageClass.getName());
+        }
+
+        byte[] bytes;
+        bytes = message.getBytes();
+        
+        int idx = 0;
+        int lastIdx = bytes.length;
+        
+        while (idx < lastIdx) {
+            idx = keyValueMarker.parse(bytes, idx, lastIdx - idx);
+            try {
+                fieldMapper.setField(target, keyValueMarker.tag, keyValueMarker.valueAsString(bytes));
+            } catch (IllegalArgumentException e) {
+                LOGGER.warn("Cannot parse field " + keyValueMarker.tag + " for " + messageClass.getSimpleName());
+            }
+        }
+        return target;
+    }
+
+    public MessageType getMessageType() { return messageType; }
+}
