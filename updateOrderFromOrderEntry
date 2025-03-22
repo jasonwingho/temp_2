@@ -14,63 +14,12 @@ private void updateOrderFromOrderEntry(Order target, Order source, TransactionLo
     
     // Update order state if entry is from RECALL/TO/OMS
     if (recallToOmsTopicName.equals(sourceTopicName)) {
-        OrderState newState = OrderState.valueOf(state);
-        LOGGER.debug("Updating order {} state to {} from RECALL/TO/OMS entry", orderId, newState);
-        target.setCurrentState(newState);
-    }
-    
-    // For PendingFill state, update or create FillRequest
-    if ("PendingFill".equals(state)) {
-        if (source.getFillRequest() != null) {
-            LOGGER.debug("Updating FillRequest for order {} in PendingFill state", orderId);
-            // Clone the execution report to avoid shared references
-            ExecutionReport sourceReport = source.getFillRequest();
-            ExecutionReport targetReport = new ExecutionReport();
-            
-            // Copy essential fields
-            targetReport.setAvgPrice(sourceReport.getAvgPrice());
-            targetReport.setClOrdID(sourceReport.getClOrdID());
-            targetReport.setOrderID(sourceReport.getOrderID());
-            targetReport.setCumQty(sourceReport.getCumQty());
-            targetReport.setCurrency(sourceReport.getCurrency());
-            targetReport.setExecID(sourceReport.getExecID());
-            targetReport.setExecTransType(sourceReport.getExecTransType());
-            targetReport.setHandlInst(sourceReport.getHandlInst());
-            targetReport.setIdSource(sourceReport.getIdSource());
-            targetReport.setLastMarket(sourceReport.getLastMarket());
-            targetReport.setLastPrice(sourceReport.getLastPrice());
-            targetReport.setLastQty(sourceReport.getLastQty());
-            targetReport.setOrderState(sourceReport.getOrderState());
-            targetReport.setOrderType(sourceReport.getOrderType());
-            targetReport.setSecurityID(sourceReport.getSecurityID());
-            targetReport.setSenderCompID(sourceReport.getSenderCompID());
-            targetReport.setSendingTime(sourceReport.getSendingTime());
-            targetReport.setSide(sourceReport.getSide());
-            targetReport.setSymbol(sourceReport.getSymbol());
-            targetReport.setTargetCompID(sourceReport.getTargetCompID());
-            targetReport.setTransactTime(sourceReport.getTransactTime());
-            targetReport.setTradeDate(sourceReport.getTradeDate());
-            targetReport.setExecType(sourceReport.getExecType());
-            targetReport.setLeavesQty(sourceReport.getLeavesQty());
-            
-            target.setFillRequest(targetReport);
-        } else if (target.getFillRequest() == null) {
-            LOGGER.debug("Creating new FillRequest for order {} in PendingFill state", orderId);
-            ExecutionReport report = new ExecutionReport();
-            report.setClOrdID(target.getClOrdID());
-            report.setOrderID(target.getOrderID());
-            report.setOrigClOrdID(target.getOrigClOrdID());
-            report.setCumQty(0L); // Initial fill quantity is 0
-            report.setLeavesQty(target.getOrdQty()); // All quantity remains
-            report.setLastQty(0L);
-            report.setLastPrice(0.0);
-            report.setAvgPrice(0.0);
-            report.setExecID(UUID.randomUUID().toString());
-            report.setCurrency(target.getCurrency());
-            report.setSide(target.getSide());
-            report.setSymbol(target.getSymbol());
-            
-            target.setFillRequest(report);
+        // We only handle Order objects here for states other than PendingFill and DoneForDay
+        // PendingFill and DoneForDay from RECALL/TO/OMS are handled in updateOrderFromExecutionReport
+        if (!"PendingFill".equals(state) && !"DoneOfDay".equals(state)) {
+            OrderState newState = OrderState.valueOf(state);
+            LOGGER.debug("Updating order {} state to {} from RECALL/TO/OMS entry", orderId, newState);
+            target.setCurrentState(newState);
         }
     }
     
@@ -114,16 +63,69 @@ private void updateOrderFromExecutionReport(Order order, ExecutionReport report,
     
     LOGGER.debug("Updating order {} from ExecutionReport entry with state {}", orderId, state);
     
-    // Update order state if entry is from OMS/TO/RECALL
+    // Update order state based on source topic
     if (omsToRecallTopicName.equals(sourceTopicName)) {
+        // For OMS/TO/RECALL
         OrderState newState = OrderState.valueOf(state);
         LOGGER.debug("Updating order {} state to {} from OMS/TO/RECALL entry", orderId, newState);
         order.setCurrentState(newState);
+    } else if (recallToOmsTopicName.equals(sourceTopicName)) {
+        // For RECALL/TO/OMS topic - handle PendingFill and DoneForDay states
+        if ("PendingFill".equals(state) || "DoneOfDay".equals(state)) {
+            OrderState newState = OrderState.valueOf(state);
+            LOGGER.debug("Updating order {} state to {} from RECALL/TO/OMS entry", orderId, newState);
+            order.setCurrentState(newState);
+        }
     }
     
-    // Update or create ExecutionReport based on state
-    if ("Filled".equals(state) || "PartiallyFilled".equals(state)) {
-        LOGGER.debug("Updating ExecutionReport for order {} in {} state", orderId, state);
+    // Handle PendingFill state from RECALL/TO/OMS
+    if (recallToOmsTopicName.equals(sourceTopicName) && "PendingFill".equals(state)) {
+        LOGGER.debug("Processing PendingFill ExecutionReport from RECALL/TO/OMS for order {}", orderId);
+        
+        if (order.getFillRequest() == null) {
+            // Create new FillRequest
+            ExecutionReport newReport = new ExecutionReport();
+            
+            // Copy fields from the source report
+            newReport.setExecID(report.getExecID());
+            newReport.setExecType(report.getExecType());
+            newReport.setClOrdID(report.getClOrdID() != null ? report.getClOrdID() : order.getClOrdID());
+            newReport.setOrderID(report.getOrderID() != null ? report.getOrderID() : order.getOrderID());
+            newReport.setOrigClOrdID(report.getOrigClOrdID() != null ? report.getOrigClOrdID() : order.getOrigClOrdID());
+            newReport.setLastQty(report.getLastQty());
+            newReport.setCumQty(report.getCumQty());
+            newReport.setLeavesQty(report.getLeavesQty());
+            newReport.setLastPrice(report.getLastPrice());
+            newReport.setAvgPrice(report.getAvgPrice());
+            newReport.setOrderState(report.getOrderState());
+            newReport.setCurrency(report.getCurrency() != null ? report.getCurrency() : order.getCurrency());
+            newReport.setSide(report.getSide() != null ? report.getSide() : order.getSide());
+            newReport.setSymbol(report.getSymbol() != null ? report.getSymbol() : order.getSymbol());
+            newReport.setTransactTime(report.getTransactTime());
+            newReport.setSendingTime(report.getSendingTime());
+            
+            order.setFillRequest(newReport);
+        } else {
+            // Update existing report
+            ExecutionReport existingReport = order.getFillRequest();
+            if (report.getExecID() != null) existingReport.setExecID(report.getExecID());
+            if (report.getExecType() != null) existingReport.setExecType(report.getExecType());
+            if (report.getLastQty() > 0) existingReport.setLastQty(report.getLastQty());
+            if (report.getCumQty() > 0) existingReport.setCumQty(report.getCumQty());
+            if (report.getLeavesQty() >= 0) existingReport.setLeavesQty(report.getLeavesQty());
+            if (report.getLastPrice() > 0) existingReport.setLastPrice(report.getLastPrice());
+            if (report.getAvgPrice() > 0) existingReport.setAvgPrice(report.getAvgPrice());
+            if (report.getOrderState() != null) existingReport.setOrderState(report.getOrderState());
+            if (report.getTransactTime() != null) existingReport.setTransactTime(report.getTransactTime());
+            if (report.getSendingTime() != null) existingReport.setSendingTime(report.getSendingTime());
+        }
+    }
+    
+    // Handle responses from OMS/TO/RECALL topic with Filled or PartiallyFilled states
+    if (omsToRecallTopicName.equals(sourceTopicName) && 
+        ("Filled".equals(state) || "PartiallyFilled".equals(state))) {
+        
+        LOGGER.debug("Updating ExecutionReport for order {} in {} state from OMS/TO/RECALL", orderId, state);
         
         ExecutionReport existingReport = order.getFillRequest();
         if (existingReport == null) {
@@ -133,34 +135,34 @@ private void updateOrderFromExecutionReport(Order order, ExecutionReport report,
             // Copy fields from the source report
             newReport.setExecID(report.getExecID());
             newReport.setExecType(report.getExecType());
-            newReport.setClOrdID(report.getClOrdID());
-            newReport.setOrderID(report.getOrderID());
-            newReport.setOrigClOrdID(report.getOrigClOrdID());
+            newReport.setClOrdID(report.getClOrdID() != null ? report.getClOrdID() : order.getClOrdID());
+            newReport.setOrderID(report.getOrderID() != null ? report.getOrderID() : order.getOrderID());
+            newReport.setOrigClOrdID(report.getOrigClOrdID() != null ? report.getOrigClOrdID() : order.getOrigClOrdID());
             newReport.setLastQty(report.getLastQty());
             newReport.setCumQty(report.getCumQty());
             newReport.setLeavesQty(report.getLeavesQty());
             newReport.setLastPrice(report.getLastPrice());
             newReport.setAvgPrice(report.getAvgPrice());
             newReport.setOrderState(report.getOrderState());
-            newReport.setCurrency(report.getCurrency());
-            newReport.setSide(report.getSide());
-            newReport.setSymbol(report.getSymbol());
+            newReport.setCurrency(report.getCurrency() != null ? report.getCurrency() : order.getCurrency());
+            newReport.setSide(report.getSide() != null ? report.getSide() : order.getSide());
+            newReport.setSymbol(report.getSymbol() != null ? report.getSymbol() : order.getSymbol());
             newReport.setTransactTime(report.getTransactTime());
             newReport.setSendingTime(report.getSendingTime());
             
             order.setFillRequest(newReport);
         } else {
             // Update fields in existing report
-            existingReport.setExecID(report.getExecID());
-            existingReport.setExecType(report.getExecType());
-            existingReport.setLastQty(report.getLastQty());
-            existingReport.setCumQty(report.getCumQty());
-            existingReport.setLeavesQty(report.getLeavesQty());
-            existingReport.setLastPrice(report.getLastPrice());
-            existingReport.setAvgPrice(report.getAvgPrice());
-            existingReport.setOrderState(report.getOrderState());
-            existingReport.setTransactTime(report.getTransactTime());
-            existingReport.setSendingTime(report.getSendingTime());
+            if (report.getExecID() != null) existingReport.setExecID(report.getExecID());
+            if (report.getExecType() != null) existingReport.setExecType(report.getExecType());
+            if (report.getLastQty() > 0) existingReport.setLastQty(report.getLastQty());
+            if (report.getCumQty() > 0) existingReport.setCumQty(report.getCumQty());
+            if (report.getLeavesQty() >= 0) existingReport.setLeavesQty(report.getLeavesQty());
+            if (report.getLastPrice() > 0) existingReport.setLastPrice(report.getLastPrice());
+            if (report.getAvgPrice() > 0) existingReport.setAvgPrice(report.getAvgPrice());
+            if (report.getOrderState() != null) existingReport.setOrderState(report.getOrderState());
+            if (report.getTransactTime() != null) existingReport.setTransactTime(report.getTransactTime());
+            if (report.getSendingTime() != null) existingReport.setSendingTime(report.getSendingTime());
         }
     }
 }
