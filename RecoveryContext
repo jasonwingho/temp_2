@@ -10,6 +10,9 @@ public class RecoveryContext {
     // Separate lists for the two types of entries
     private final List<TransactionLogEntry> ticketHistoryEntries;
     private final List<TransactionLogEntry> omsEntries;
+    
+    // Rebuilt Order object for determining recovery strategy
+    private Order rebuiltOrder;
 
     public RecoveryContext(String orderId, TransactionLogEntry ticketEntry, 
                           List<TransactionLogEntry> ticketHistoryEntries, 
@@ -24,8 +27,153 @@ public class RecoveryContext {
         // Set up separate entry lists
         this.ticketHistoryEntries = ticketHistoryEntries != null ? new ArrayList<>(ticketHistoryEntries) : new ArrayList<>();
         this.omsEntries = omsEntries != null ? new ArrayList<>(omsEntries) : new ArrayList<>();
+        
+        // Rebuild Order - this will be lazily initialized when getRebuiltOrder() is called
+        this.rebuiltOrder = null;
     }
 
+    /**
+     * Gets the rebuilt Order object, building it if necessary
+     * 
+     * @return The rebuilt Order object
+     */
+    public Order getRebuiltOrder() {
+        if (rebuiltOrder == null) {
+            rebuiltOrder = rebuildOrder();
+        }
+        return rebuiltOrder;
+    }
+    
+    /**
+     * Rebuilds the Order object from transaction logs
+     * 
+     * @return The rebuilt Order, or null if rebuilding fails
+     */
+    private Order rebuildOrder() {
+        if (ticket == null) {
+            // Cannot rebuild without a ticket
+            return null;
+        }
+        
+        try {
+            // Create base order from ticket
+            Order order = Order.createFromRecallTicket(ticket);
+            if (order == null) {
+                return null;
+            }
+            
+            // Always set initial state to New
+            order.setCurrentState(OrderState.New);
+            
+            // Always set fill quantity to 0
+            setOrderFillQuantity(order, 0);
+            
+            // Determine recall quantity
+            long recallQty;
+            if (!omsEntries.isEmpty()) {
+                // Get the first OMS entry
+                List<TransactionLogEntry> sortedOmsEntries = new ArrayList<>(omsEntries);
+                sortedOmsEntries.sort(Comparator.comparing(TransactionLogEntry::getTimestamp));
+                TransactionLogEntry firstEntry = sortedOmsEntries.get(0);
+                
+                recallQty = firstEntry.getRecallQty();
+            } else {
+                // Fall back to recall quantity from ticket
+                recallQty = ticket.getRecallQty();
+            }
+            
+            // Set recall quantity
+            setOrderRecallQuantity(order, recallQty);
+            
+            // Process OMS entries to update the order
+            updateOrderFromOmsEntries(order);
+            
+            return order;
+        } catch (Exception e) {
+            // Log error and return null
+            return null;
+        }
+    }
+    
+    /**
+     * Sets the fill quantity for an order
+     * 
+     * @param order The order to update
+     * @param fillQty The fill quantity to set
+     */
+    private void setOrderFillQuantity(Order order, long fillQty) {
+        // If there's an execution report, update it
+        if (order.getFillRequest() != null) {
+            ExecutionReport report = order.getFillRequest();
+            report.setLastQty(fillQty);
+            report.setCumQty(fillQty);
+            
+            // Update leaves quantity if we know recall quantity
+            long recallQty = order.getOrdQty();
+            report.setLeavesQty(recallQty - fillQty);
+        }
+    }
+    
+    /**
+     * Sets the recall quantity for an order
+     * 
+     * @param order The order to update
+     * @param recallQty The recall quantity to set
+     */
+    private void setOrderRecallQuantity(Order order, long recallQty) {
+        // Set the order quantity
+        order.setOrdQty(recallQty);
+        
+        // If there's an execution report, update leaves quantity
+        if (order.getFillRequest() != null) {
+            ExecutionReport report = order.getFillRequest();
+            long fillQty = report.getCumQty();
+            report.setLeavesQty(recallQty - fillQty);
+        }
+        
+        // If there's an amend request, update it
+        if (order.getAmendRequest() != null) {
+            order.getAmendRequest().setOrderQty(recallQty);
+        }
+    }
+    
+    /**
+     * Updates the order from OMS entries
+     * 
+     * @param order The order to update
+     */
+    private void updateOrderFromOmsEntries(Order order) {
+        if (omsEntries.isEmpty()) {
+            return;
+        }
+        
+        // Sort entries chronologically
+        List<TransactionLogEntry> sortedEntries = new ArrayList<>(omsEntries);
+        sortedEntries.sort(Comparator.comparing(TransactionLogEntry::getTimestamp));
+        
+        // Process each entry
+        for (TransactionLogEntry entry : sortedEntries) {
+            // Try to handle as Order
+            Order entryOrder = entry.getMessageAs(Order.class);
+            if (entryOrder != null) {
+                updateOrderFromOrderEntry(order, entryOrder, entry);
+                continue;
+            }
+            
+            // Try to handle as ExecutionReport
+            ExecutionReport report = entry.getMessageAs(ExecutionReport.class);
+            if (report != null) {
+                updateOrderFromExecutionReport(order, report, entry);
+                continue;
+            }
+        }
+    }
+    
+    // Include the updateOrderFromOrderEntry and updateOrderFromExecutionReport methods here
+    // (using the implementations provided above)
+
+    // Other getters...
+    
     public String getOrderId() {
         return orderId;
     }
@@ -49,36 +197,16 @@ public class RecoveryContext {
     public List<TransactionLogEntry> getOmsEntries() {
         return new ArrayList<>(omsEntries);
     }
-
-    // Helper method to find latest entry from a specific source in OMS entries
-    public TransactionLogEntry getLatestOmsEntryBySource(String source) {
-        return omsEntries.stream()
-            .filter(entry -> source.equals(entry.getSource()))
-            .max(Comparator.comparing(TransactionLogEntry::getTimestamp))
-            .orElse(null);
-    }
-    
-    // Helper method to get the latest entry from OMS entries regardless of source
-    public TransactionLogEntry getLatestOmsEntry() {
-        return omsEntries.stream()
-            .max(Comparator.comparing(TransactionLogEntry::getTimestamp))
-            .orElse(null);
-    }
     
     // Helper method to get the latest state from OMS entries
     public String getLatestOmsState() {
-        TransactionLogEntry latest = getLatestOmsEntry();
-        return latest != null ? latest.getState() : null;
-    }
-
-    @Override
-    public String toString() {
-        return "RecoveryContext{" +
-            "orderId='" + orderId + '\'' +
-            ", historyState='" + historyState + '\'' +
-            ", latestOmsState='" + getLatestOmsState() + '\'' +
-            ", ticketHistoryEntries=" + ticketHistoryEntries.size() +
-            ", omsEntries=" + omsEntries.size() +
-        '}';
+        if (omsEntries.isEmpty()) {
+            return null;
+        }
+        
+        return omsEntries.stream()
+            .max(Comparator.comparing(TransactionLogEntry::getTimestamp))
+            .map(TransactionLogEntry::getState)
+            .orElse(null);
     }
 }
