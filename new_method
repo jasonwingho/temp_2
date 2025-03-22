@@ -1,0 +1,169 @@
+/**
+ * Based on transaction logs, determine the correct state for each order and populate into the cache
+ * Filters log entries newer than the provided bookmark timestamps
+ * 
+ * @param recallTicketBookmarkTimestamp Timestamp to filter RECALL/TICKET/HISTORY entries
+ * @param omsToRecallBookmarkTimestamp Timestamp to filter RECALL/TO/OMS and OMS/TO/RECALL entries
+ */
+private void populateCacheFromRecallTicketLogs(String recallTicketBookmarkTimestamp, String omsToRecallBookmarkTimestamp) {
+    LOGGER.info("Populating cache from transaction logs - starting recovery process");
+    LOGGER.info("Using bookmark timestamps - RECALL/TICKET/HISTORY: {}, OMS/TO/RECALL: {}", 
+        recallTicketBookmarkTimestamp, omsToRecallBookmarkTimestamp);
+    
+    int processedCount = 0;
+    int rebuildCount = 0;
+    int republishCount = 0;
+    int ignoreCount = 0;
+    int errorCount = 0;
+    int discardedHistoryCount = 0;
+    int discardedOmsCount = 0;
+
+    // Parse bookmark timestamps
+    Instant recallTicketBookmarkInstant = parseBookmarkTimestamp(recallTicketBookmarkTimestamp);
+    Instant omsToRecallBookmarkInstant = parseBookmarkTimestamp(omsToRecallBookmarkTimestamp);
+
+    // Process each order's transaction log
+    for (Map.Entry<String, List<TransactionLogEntry>> entry : transactionLogs.entrySet()) {
+        String orderId = entry.getKey();
+        List<TransactionLogEntry> allLogEntries = entry.getValue();
+        
+        try {
+            processedCount++;
+            
+            // Skip empty logs
+            if (allLogEntries == null || allLogEntries.isEmpty()) {
+                LOGGER.warn("Empty transaction log for order {}, skipping recovery", orderId);
+                continue;
+            }
+            
+            // Split and filter log entries based on source and timestamps
+            List<TransactionLogEntry> ticketHistoryEntries = new ArrayList<>();
+            List<TransactionLogEntry> omsEntries = new ArrayList<>();
+            
+            for (TransactionLogEntry logEntry : allLogEntries) {
+                String source = logEntry.getSource();
+                Instant timestamp = logEntry.getTimestamp();
+                
+                if (recallTicketHistoryTopicName.equals(source)) {
+                    // Filter out entries newer than the bookmark timestamp
+                    if (recallTicketBookmarkInstant != null && 
+                        timestamp.isAfter(recallTicketBookmarkInstant)) {
+                        LOGGER.debug("Discarding {} entry for order {} - timestamp {} is newer than bookmark {}",
+                            source, orderId, timestamp, recallTicketBookmarkInstant);
+                        discardedHistoryCount++;
+                        continue;
+                    }
+                    ticketHistoryEntries.add(logEntry);
+                } else if (recallToOmsTopicName.equals(source) || omsToRecallTopicName.equals(source)) {
+                    // Filter out entries newer than the bookmark timestamp
+                    if (omsToRecallBookmarkInstant != null && 
+                        timestamp.isAfter(omsToRecallBookmarkInstant)) {
+                        LOGGER.debug("Discarding {} entry for order {} - timestamp {} is newer than bookmark {}",
+                            source, orderId, timestamp, omsToRecallBookmarkInstant);
+                        discardedOmsCount++;
+                        continue;
+                    }
+                    omsEntries.add(logEntry);
+                }
+            }
+            
+            // Sort both lists chronologically
+            ticketHistoryEntries.sort(Comparator.comparing(TransactionLogEntry::getTimestamp));
+            omsEntries.sort(Comparator.comparing(TransactionLogEntry::getTimestamp));
+            
+            // Skip if no ticket history exists after filtering
+            if (ticketHistoryEntries.isEmpty()) {
+                LOGGER.warn("Order {} has no valid ticket history entries after filtering, skipping recovery", orderId);
+                continue;
+            }
+            
+            // Get the latest entry from ticket history
+            TransactionLogEntry latestTicketHistory = ticketHistoryEntries.get(ticketHistoryEntries.size() - 1);
+            
+            // Find the latest OMS request and response entries
+            TransactionLogEntry latestOmsRequest = findLatestEntryFromSource(omsEntries, recallToOmsTopicName);
+            TransactionLogEntry latestOmsResponse = findLatestEntryFromSource(omsEntries, omsToRecallTopicName);
+            
+            // Create a merged list for the recovery context
+            List<TransactionLogEntry> filteredLogEntries = new ArrayList<>();
+            filteredLogEntries.addAll(ticketHistoryEntries);
+            filteredLogEntries.addAll(omsEntries);
+            filteredLogEntries.sort(Comparator.comparing(TransactionLogEntry::getTimestamp));
+            
+            // Create recovery context with the filtered and sorted entries
+            RecoveryContext context = new RecoveryContext(
+                orderId, 
+                latestTicketHistory, 
+                latestOmsRequest, 
+                latestOmsResponse, 
+                filteredLogEntries
+            );
+            
+            // Use the recovery service to determine action and handle recovery
+            RecoveryActionType action = recoveryService.determineRecoveryAction(context);
+            
+            // Execute the action and update counters
+            switch (action) {
+                case REBUILD:
+                    recoveryService.executeRecoveryAction(context, action);
+                    rebuildCount++;
+                    break;
+                case REPUBLISH:
+                    recoveryService.executeRecoveryAction(context, action);
+                    republishCount++;
+                    break;
+                case IGNORE:
+                    LOGGER.debug("Ignoring order {} during recovery as determined by strategy", orderId);
+                    ignoreCount++;
+                    break;
+            }
+        } catch (Exception e) {
+            LOGGER.error("Error processing transaction log for order {}: {}", orderId, e.getMessage(), e);
+            errorCount++;
+        }
+    }
+    
+    // Log recovery statistics
+    LOGGER.info("Cache population completed. Statistics:");
+    LOGGER.info(" Total orders processed: {}", processedCount);
+    LOGGER.info(" Entries discarded (history): {}", discardedHistoryCount);
+    LOGGER.info(" Entries discarded (OMS): {}", discardedOmsCount);
+    LOGGER.info(" Orders rebuilt: {}", rebuildCount);
+    LOGGER.info(" Orders republished: {}", republishCount);
+    LOGGER.info(" Orders ignored: {}", ignoreCount);
+    LOGGER.info(" Orders errored: {}", errorCount);
+    LOGGER.info(" Final cache state - RecallTicket count: {}, Order count: {}", recallTicketCache.size(), orderCache.size());
+}
+
+/**
+ * Parse a bookmark timestamp string into an Instant
+ * Expected format is like "20250321T135819.4635267Z"
+ * 
+ * @param timestampStr The bookmark timestamp string
+ * @return The parsed Instant, or null if parsing failed
+ */
+private Instant parseBookmarkTimestamp(String timestampStr) {
+    if (timestampStr == null || timestampStr.isEmpty()) {
+        LOGGER.debug("No bookmark timestamp provided, all entries will be processed");
+        return null;
+    }
+    
+    try {
+        // Try to handle the format from the screenshot: yyyyMMdd'T'HHmmss.SSSSSSS'Z'
+        // The Z indicates UTC/GMT timezone
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss.SSSSSSS'Z'")
+            .withZone(ZoneId.of("GMT"));
+        
+        // Extract just the timestamp part if there are commas or other delimiters
+        if (timestampStr.contains(",")) {
+            timestampStr = timestampStr.split(",")[0];
+        }
+        
+        // Parse the timestamp
+        return Instant.from(formatter.parse(timestampStr));
+    } catch (Exception e) {
+        LOGGER.warn("Failed to parse bookmark timestamp: {}. Error: {}", timestampStr, e.getMessage());
+        LOGGER.warn("All entries will be processed without timestamp filtering.");
+        return null;
+    }
+}
