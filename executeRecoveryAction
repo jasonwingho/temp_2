@@ -1,0 +1,108 @@
+/**
+ * Executes the specified recovery action for the given context
+ * This method delegates the execution of the recovery action to the appropriate method in the ThreadSafeCache
+ * 
+ * @param context The recovery context
+ * @param actionType The recovery action to execute
+ */
+public void executeRecoveryAction(RecoveryContext context, RecoveryActionType actionType) {
+    switch (actionType) {
+        case REBUILD:
+            LOGGER.info("Executing REBUILD action for order {}", context.getOrderId());
+            rebuildOrder(context);
+            break;
+        case REPUBLISH:
+            LOGGER.info("Executing REPUBLISH action for order {}", context.getOrderId());
+            rebuildOrder(context);
+            republishTicket(context.getTicket());
+            break;
+        case IGNORE:
+            LOGGER.info("Executing IGNORE action for order {}", context.getOrderId());
+            // No action needed for IGNORE
+            break;
+        default:
+            LOGGER.error("Unknown recovery action: {}", actionType);
+            break;
+    }
+}
+
+/**
+ * Rebuilds an order from transaction logs
+ * 
+ * @param context The recovery context
+ */
+private void rebuildOrder(RecoveryContext context) {
+    String orderId = context.getOrderId();
+    RecallTicket ticket = context.getTicket();
+    
+    if (ticket == null) {
+        LOGGER.error("Cannot rebuild order {} - no valid ticket found", orderId);
+        return;
+    }
+    
+    // Add ticket to cache
+    cache.updateRecallTicket(ticket.getId(), ticket);
+    
+    // Create a base order from the ticket
+    try {
+        Order order = Order.createFromRecallTicket(ticket);
+        if (order == null) {
+            LOGGER.error("Failed to create base order for {}", orderId);
+            return;
+        }
+        
+        // Set initial state from ticket
+        OrderState initialState = mapTicketStateToOrderState(ticket.getCurrentState());
+        order.setCurrentState(initialState);
+        
+        // Process OMS entries to update the order
+        updateOrderFromOmsEntries(order, context.getOmsEntries());
+        
+        // Add order to cache
+        cache.updateOrder(orderId, order);
+        LOGGER.info("Successfully rebuilt order {} with state {}", orderId, order.getCurrentState());
+    } catch (Exception e) {
+        LOGGER.error("Error rebuilding order {}: {}", orderId, e.getMessage(), e);
+    }
+}
+
+/**
+ * Updates an order based on OMS entries
+ * 
+ * @param order The order to update
+ * @param omsEntries The OMS entries
+ */
+private void updateOrderFromOmsEntries(Order order, List<TransactionLogEntry> omsEntries) {
+    if (omsEntries == null || omsEntries.isEmpty()) {
+        return;
+    }
+    
+    // Process entries in chronological order
+    List<TransactionLogEntry> sortedEntries = new ArrayList<>(omsEntries);
+    sortedEntries.sort(Comparator.comparing(TransactionLogEntry::getTimestamp));
+    
+    for (TransactionLogEntry entry : sortedEntries) {
+        try {
+            // Handle entry based on source and contained object type
+            String source = entry.getSource();
+            
+            // Try to handle as Order
+            Order entryOrder = entry.getMessageAs(Order.class);
+            if (entryOrder != null) {
+                updateOrderFromOrderEntry(order, entryOrder, entry);
+                continue;
+            }
+            
+            // Try to handle as ExecutionReport
+            ExecutionReport report = entry.getMessageAs(ExecutionReport.class);
+            if (report != null) {
+                updateOrderFromExecutionReport(order, report, entry);
+                continue;
+            }
+            
+            LOGGER.warn("Entry for order {} has unknown message type", order.getOrderID());
+        } catch (Exception e) {
+            LOGGER.error("Error processing entry for order {}: {}", order.getOrderID(), e.getMessage());
+        }
+    }
+}
