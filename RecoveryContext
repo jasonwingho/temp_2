@@ -1,0 +1,84 @@
+public class RecoveryContext {
+    // The Id of Order/RecallTicket to be recovered
+    private final String orderId;
+    // The recall ticket from RECALL/TICKET/HISTORY
+    private final RecallTicket ticket;
+    // State from RECALL/TICKET/HISTORY
+    private final String historyState;
+    // Latest TransactionLogEntry from RECALL/TICKET/HISTORY
+    private final TransactionLogEntry ticketEntry;
+    // Separate lists for the two types of entries
+    private final List<TransactionLogEntry> ticketHistoryEntries;
+    private final List<TransactionLogEntry> omsEntries;
+
+    public RecoveryContext(String orderId, TransactionLogEntry ticketEntry, 
+                          List<TransactionLogEntry> ticketHistoryEntries, 
+                          List<TransactionLogEntry> omsEntries) {
+        this.orderId = orderId;
+        this.ticketEntry = ticketEntry;
+        
+        // Extract data from ticket entry
+        this.ticket = ticketEntry != null ? ticketEntry.getMessageAs(RecallTicket.class) : null;
+        this.historyState = ticketEntry != null ? ticketEntry.getState() : null;
+        
+        // Set up separate entry lists
+        this.ticketHistoryEntries = ticketHistoryEntries != null ? new ArrayList<>(ticketHistoryEntries) : new ArrayList<>();
+        this.omsEntries = omsEntries != null ? new ArrayList<>(omsEntries) : new ArrayList<>();
+    }
+
+    public String getOrderId() {
+        return orderId;
+    }
+
+    public RecallTicket getTicket() {
+        return ticket;
+    }
+
+    public String getHistoryState() {
+        return historyState;
+    }
+
+    public TransactionLogEntry getTicketEntry() {
+        return ticketEntry;
+    }
+
+    public List<TransactionLogEntry> getTicketHistoryEntries() {
+        return new ArrayList<>(ticketHistoryEntries);
+    }
+
+    public List<TransactionLogEntry> getOmsEntries() {
+        return new ArrayList<>(omsEntries);
+    }
+
+    // Helper method to find latest entry from a specific source in OMS entries
+    public TransactionLogEntry getLatestOmsEntryBySource(String source) {
+        return omsEntries.stream()
+            .filter(entry -> source.equals(entry.getSource()))
+            .max(Comparator.comparing(TransactionLogEntry::getTimestamp))
+            .orElse(null);
+    }
+    
+    // Helper method to get the latest entry from OMS entries regardless of source
+    public TransactionLogEntry getLatestOmsEntry() {
+        return omsEntries.stream()
+            .max(Comparator.comparing(TransactionLogEntry::getTimestamp))
+            .orElse(null);
+    }
+    
+    // Helper method to get the latest state from OMS entries
+    public String getLatestOmsState() {
+        TransactionLogEntry latest = getLatestOmsEntry();
+        return latest != null ? latest.getState() : null;
+    }
+
+    @Override
+    public String toString() {
+        return "RecoveryContext{" +
+            "orderId='" + orderId + '\'' +
+            ", historyState='" + historyState + '\'' +
+            ", latestOmsState='" + getLatestOmsState() + '\'' +
+            ", ticketHistoryEntries=" + ticketHistoryEntries.size() +
+            ", omsEntries=" + omsEntries.size() +
+        '}';
+    }
+}
