@@ -1,0 +1,252 @@
+/**
+ * Determines the appropriate recovery action for the given context.
+ * 
+ * @param context The recovery context
+ * @return The recovery action to take
+ */
+public RecoveryActionType determineAction(RecoveryContext context) {
+    String orderId = context.getOrderId();
+    Order rebuiltOrder = context.getRebuiltOrder();
+    RecallTicket ticket = context.getTicket();
+    
+    // If we couldn't rebuild the order or ticket is missing, we need to log and ignore
+    if (rebuiltOrder == null || ticket == null) {
+        LOGGER.warn("Unable to rebuild order {} or missing ticket - ignoring during recovery", orderId);
+        return RecoveryActionType.IGNORE;
+    }
+    
+    // Get states for comparison
+    OrderState orderState = rebuiltOrder.getCurrentState();
+    String ticketState = ticket.getCurrentState();
+    
+    LOGGER.info("Comparing states for order {}: Order state={}, Ticket state={}", 
+        orderId, orderState, ticketState);
+    
+    // Check if states are considered equivalent based on special rules
+    if (areStatesEquivalent(orderState, ticketState)) {
+        LOGGER.info("States are considered equivalent for order {} - rebuilding", orderId);
+        
+        // Special case: If both are in final filled/canceled states, we need to republish DFD request
+        if (isFinalFilledOrCanceledState(orderState.toString()) && 
+            isFinalFilledOrCanceledState(ticketState)) {
+            LOGGER.info("Both order and ticket are in final filled/canceled states - publishing DFD request");
+            context.setNeedsDfdRequest(true);
+        }
+        
+        return RecoveryActionType.REBUILD;
+    } else {
+        // Handle state mismatch based on states
+        return handleStateMismatch(context, rebuiltOrder, ticket, orderState, ticketState);
+    }
+}
+
+/**
+ * Handles state mismatch between order and ticket
+ */
+private RecoveryActionType handleStateMismatch(RecoveryContext context, Order order, 
+                                             RecallTicket ticket, OrderState orderState, 
+                                             String ticketState) {
+    String orderId = context.getOrderId();
+    
+    // Case 1: Final filled/canceled states - need DFD request
+    if (isFinalFilledOrCanceledState(orderState.toString()) && 
+        isFinalFilledOrCanceledState(ticketState)) {
+        LOGGER.info("Both order and ticket are in final filled/canceled states with different values - publishing DFD request");
+        context.setNeedsDfdRequest(true);
+        return RecoveryActionType.REBUILD;
+    }
+    
+    // Case 2: Ticket is in a pending state but order state doesn't match
+    if (isPendingState(ticketState) && !orderState.toString().equals(ticketState)) {
+        // Check if quantities and price match
+        boolean quantitiesAndPriceMatch = checkQuantitiesAndPriceMatch(order, ticket);
+        
+        if (quantitiesAndPriceMatch) {
+            // If quantities and price match, force update ticket state and log error
+            LOGGER.error("State mismatch for order {} but quantities and price match - forcing ticket state update from {} to {}", 
+                orderId, ticketState, orderState);
+            ticket.setCurrentState(orderState.toString());
+            context.setForceTicketStateUpdate(true);
+            return RecoveryActionType.REBUILD;
+        } else {
+            // If quantities or price don't match, reset ticket state and republish
+            LOGGER.warn("State mismatch for order {} with different quantities/price - resetting ticket state to {} and republishing", 
+                orderId, orderState);
+            ticket.setCurrentState(orderState.toString());
+            return RecoveryActionType.REPUBLISH;
+        }
+    }
+    
+    // Default case: Republish
+    LOGGER.info("States mismatch for order {}: Order state={}, Ticket state={} - republishing", 
+        orderId, orderState, ticketState);
+    return RecoveryActionType.REPUBLISH;
+}
+
+/**
+ * Checks if quantities and price match between order and ticket
+ */
+private boolean checkQuantitiesAndPriceMatch(Order order, RecallTicket ticket) {
+    // Get recall qty
+    long orderRecallQty = order.getOrdQty();
+    long ticketRecallQty = ticket.getRecallQty();
+    
+    // Get fill qty
+    long orderFillQty = 0;
+    if (order.getFillRequest() != null) {
+        orderFillQty = order.getFillRequest().getCumQty();
+    }
+    long ticketFillQty = ticket.getFillQty();
+    
+    // Get price
+    double orderPrice = 0.0;
+    if (order.getFillRequest() != null) {
+        orderPrice = order.getFillRequest().getAvgPrice();
+    }
+    double ticketPrice = ticket.getFillPrice();
+    
+    // Compare values
+    boolean recallQtyMatch = orderRecallQty == ticketRecallQty;
+    boolean fillQtyMatch = orderFillQty == ticketFillQty;
+    boolean priceMatch = Math.abs(orderPrice - ticketPrice) < 0.0001; // Use small epsilon for double comparison
+    
+    return recallQtyMatch && fillQtyMatch && priceMatch;
+}
+
+/**
+ * Checks if the given state is a final filled or canceled state.
+ */
+private boolean isFinalFilledOrCanceledState(String state) {
+    return "Filled".equals(state) || 
+           "PartiallyFilled".equals(state) || 
+           "Canceled".equals(state);
+}
+
+/**
+ * Checks if the given state is a pending state.
+ */
+private boolean isPendingState(String state) {
+    return "PendingNew".equals(state) || 
+           "PendingReplace".equals(state) || 
+           "PendingFill".equals(state) || 
+           "PendingCancel".equals(state);
+}
+
+-------------------------------------------------------------
+
+
+public class RecoveryContext {
+    // Existing fields...
+    
+    // Additional flags for special handling
+    private boolean needsDfdRequest = false;
+    private boolean forceTicketStateUpdate = false;
+    
+    // Existing constructor and methods...
+    
+    /**
+     * Sets whether a DFD request needs to be published
+     */
+    public void setNeedsDfdRequest(boolean needsDfdRequest) {
+        this.needsDfdRequest = needsDfdRequest;
+    }
+    
+    /**
+     * Gets whether a DFD request needs to be published
+     */
+    public boolean needsDfdRequest() {
+        return needsDfdRequest;
+    }
+    
+    /**
+     * Sets whether to force ticket state update
+     */
+    public void setForceTicketStateUpdate(boolean forceTicketStateUpdate) {
+        this.forceTicketStateUpdate = forceTicketStateUpdate;
+    }
+    
+    /**
+     * Gets whether to force ticket state update
+     */
+    public boolean isForceTicketStateUpdate() {
+        return forceTicketStateUpdate;
+    }
+}
+
+---------------------------------------------------------------------------
+/**
+ * Executes the specified recovery action for the given context.
+ */
+public void executeRecoveryAction(RecoveryContext context, RecoveryActionType action) {
+    String orderId = context.getOrderId();
+    Order order = context.getRebuiltOrder();
+    RecallTicket ticket = context.getTicket();
+    
+    if (order == null || ticket == null) {
+        LOGGER.warn("Cannot execute action {} - order or ticket is null", action);
+        return;
+    }
+    
+    switch (action) {
+        case REBUILD:
+            LOGGER.info("Executing REBUILD action for order {}", orderId);
+            
+            // Add objects to cache
+            cache.updateOrder(orderId, order);
+            cache.updateRecallTicket(ticket.getId(), ticket);
+            
+            // Handle DFD request if needed
+            if (context.needsDfdRequest()) {
+                sendDfdRequest(order);
+            }
+            
+            // Log if forced state update
+            if (context.isForceTicketStateUpdate()) {
+                LOGGER.error("Forcing ticket state update for order {} to match order state {}",
+                    orderId, order.getCurrentState());
+            }
+            break;
+            
+        case REPUBLISH:
+            LOGGER.info("Executing REPUBLISH action for order {}", orderId);
+            
+            // Add objects to cache
+            cache.updateOrder(orderId, order);
+            cache.updateRecallTicket(ticket.getId(), ticket);
+            
+            // Republish ticket
+            republishTicket(ticket);
+            break;
+            
+        case IGNORE:
+            LOGGER.info("Executing IGNORE action for order {}", orderId);
+            // No action needed for IGNORE
+            break;
+            
+        default:
+            LOGGER.error("Unknown recovery action: {}", action);
+            break;
+    }
+}
+
+/**
+ * Sends a DFD (Done For Day) request for an order
+ */
+private void sendDfdRequest(Order order) {
+    if (order == null || orderFixTransformer == null || ampsClient == null || dfdTopic == null) {
+        LOGGER.warn("Cannot send DFD request - required components are missing");
+        return;
+    }
+    
+    try {
+        LOGGER.info("Sending DFD request for order {}", order.getOrderID());
+        
+        String fixMessage = orderFixTransformer.transform(order, new OrderDoneForDayRequestEvent());
+        ampsClient.publish(dfdTopic, fixMessage);
+        
+        LOGGER.info("Successfully sent DFD request for order {}", order.getOrderID());
+    } catch (Exception e) {
+        LOGGER.error("Failed to send DFD request for order {}: {}", 
+            order.getOrderID(), e.getMessage(), e);
+    }
+}
