@@ -1,0 +1,36 @@
+/**
+ * Republishes a ticket to the RECALL/TICKET topic.
+ * 
+ * @param ticket The RecallTicket to republish
+ */
+private void republishTicket(RecallTicket ticket) {
+    if (ticket == null) {
+        LOGGER.warn("Cannot republish ticket - ticket is null");
+        return;
+    }
+    
+    if (ampsClient == null) {
+        LOGGER.warn("Cannot republish ticket {} - AMPS client is null", ticket.getId());
+        return;
+    }
+    
+    try {
+        // Serialize the ticket to JSON
+        String jsonStr = objectMapper.writeValueAsString(ticket);
+        
+        // Publish to RECALL/TICKET topic
+        ampsClient.publish("RECALL/TICKET", jsonStr);
+        
+        LOGGER.info("Successfully republished ticket {} with state {} to RECALL/TICKET topic", 
+            ticket.getId(), ticket.getCurrentState());
+    } catch (JsonProcessingException e) {
+        LOGGER.error("Failed to serialize ticket {} for republishing: {}", 
+            ticket.getId(), e.getMessage(), e);
+    } catch (AMPSException e) {
+        LOGGER.error("Failed to publish ticket {} to RECALL/TICKET topic: {}", 
+            ticket.getId(), e.getMessage(), e);
+    } catch (Exception e) {
+        LOGGER.error("Unexpected error while republishing ticket {}: {}", 
+            ticket.getId(), e.getMessage(), e);
+    }
+}
