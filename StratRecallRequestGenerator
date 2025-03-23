@@ -1,0 +1,162 @@
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+public class StratRecallRequestGenerator {
+    // Main class to generate the JSON string
+    public static String generateJsonRequest(StratRecallRequest request) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            return mapper.writeValueAsString(request);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+    
+    // Example usage
+    public static void main(String[] args) {
+        StratRecallRequest request = createSampleRequest();
+        String jsonString = generateJsonRequest(request);
+        System.out.println(jsonString);
+    }
+    
+    private static StratRecallRequest createSampleRequest() {
+        // Create sample destination
+        List<String> ticketIds = new ArrayList<>();
+        ticketIds.add("F0WRtKJpSTuXZY7tJDvzMwx8bc");
+        ticketIds.add("F0WRtKJpSTuXZY7tJDvzMwx8bf");
+        ticketIds.add("F0WRtKJpSTuXZY7tJDvzMwx8c2");
+        ticketIds.add("F0WRtKJpSTuXZY7tJDvzMwx8c5");
+        
+        // Create sample rows
+        List<Row> rows = new ArrayList<>();
+        rows.add(new Row(1, "BEG,Fund,Original Recall Qty"));
+        rows.add(new Row(2, "002881 C2,RIGEL_CN2,34800.0"));
+        rows.add(new Row(3, "300633 C2,RIGEL_CN,6044.0"));
+        rows.add(new Row(4, "300766 C2,RIGEL_CN2,9601.0"));
+        
+        // Create content
+        Content content = new Content(rows);
+        
+        // Create destination
+        Destination destination = new Destination("MCClear", "File", "SOD", 
+            "BofA_China_Recall_20250320_134433.csv", "/test", ticketIds, content);
+        
+        List<Destination> destinations = new ArrayList<>();
+        destinations.add(destination);
+        
+        // Create the full request
+        return new StratRecallRequest(null, null, "Completed", "8zIGuPpiR8yfi7xMj4qaiwx7be", 
+            "WF", "StratsRecallGUI", new Date().getTime(), destinations);
+    }
+}
+
+// Class that represents the main request
+class StratRecallRequest {
+    private String userId;
+    private String fieldMapper;
+    private String reqState;
+    private String reqId;
+    private String reqType;
+    private String reqSystem;
+    private long reqTimeStamp;
+    private List<Destination> destinations;
+    
+    public StratRecallRequest(String userId, String fieldMapper, String reqState, String reqId, 
+                             String reqType, String reqSystem, long reqTimeStamp, 
+                             List<Destination> destinations) {
+        this.userId = userId;
+        this.fieldMapper = fieldMapper;
+        this.reqState = reqState;
+        this.reqId = reqId;
+        this.reqType = reqType;
+        this.reqSystem = reqSystem;
+        this.reqTimeStamp = reqTimeStamp;
+        this.destinations = destinations;
+    }
+    
+    // Getters and setters
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
+    public String getFieldMapper() { return fieldMapper; }
+    public void setFieldMapper(String fieldMapper) { this.fieldMapper = fieldMapper; }
+    public String getReqState() { return reqState; }
+    public void setReqState(String reqState) { this.reqState = reqState; }
+    public String getReqId() { return reqId; }
+    public void setReqId(String reqId) { this.reqId = reqId; }
+    public String getReqType() { return reqType; }
+    public void setReqType(String reqType) { this.reqType = reqType; }
+    public String getReqSystem() { return reqSystem; }
+    public void setReqSystem(String reqSystem) { this.reqSystem = reqSystem; }
+    public long getReqTimeStamp() { return reqTimeStamp; }
+    public void setReqTimeStamp(long reqTimeStamp) { this.reqTimeStamp = reqTimeStamp; }
+    public List<Destination> getDestinations() { return destinations; }
+    public void setDestinations(List<Destination> destinations) { this.destinations = destinations; }
+}
+
+class Destination {
+    private String targetSystem;
+    private String type;
+    private String ftpType;
+    private String fileName;
+    private String ftpPath;
+    private List<String> ticketIds;
+    private Content content;
+    
+    public Destination(String targetSystem, String type, String ftpType, String fileName, 
+                      String ftpPath, List<String> ticketIds, Content content) {
+        this.targetSystem = targetSystem;
+        this.type = type;
+        this.ftpType = ftpType;
+        this.fileName = fileName;
+        this.ftpPath = ftpPath;
+        this.ticketIds = ticketIds;
+        this.content = content;
+    }
+    
+    // Getters and setters
+    public String getTargetSystem() { return targetSystem; }
+    public void setTargetSystem(String targetSystem) { this.targetSystem = targetSystem; }
+    public String getType() { return type; }
+    public void setType(String type) { this.type = type; }
+    public String getFtpType() { return ftpType; }
+    public void setFtpType(String ftpType) { this.ftpType = ftpType; }
+    public String getFileName() { return fileName; }
+    public void setFileName(String fileName) { this.fileName = fileName; }
+    public String getFtpPath() { return ftpPath; }
+    public void setFtpPath(String ftpPath) { this.ftpPath = ftpPath; }
+    public List<String> getTicketIds() { return ticketIds; }
+    public void setTicketIds(List<String> ticketIds) { this.ticketIds = ticketIds; }
+    public Content getContent() { return content; }
+    public void setContent(Content content) { this.content = content; }
+}
+
+class Content {
+    private List<Row> rows;
+    
+    public Content(List<Row> rows) {
+        this.rows = rows;
+    }
+    
+    // Getters and setters
+    public List<Row> getRows() { return rows; }
+    public void setRows(List<Row> rows) { this.rows = rows; }
+}
+
+class Row {
+    private int rowNum;
+    private String rowItem;
+    
+    public Row(int rowNum, String rowItem) {
+        this.rowNum = rowNum;
+        this.rowItem = rowItem;
+    }
+    
+    // Getters and setters
+    public int getRowNum() { return rowNum; }
+    public void setRowNum(int rowNum) { this.rowNum = rowNum; }
+    public String getRowItem() { return rowItem; }
+    public void setRowItem(String rowItem) { this.rowItem = rowItem; }
+}
