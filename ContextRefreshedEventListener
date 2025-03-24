@@ -1,0 +1,55 @@
+package org.springframework.context.event;
+
+import com.a.gdot.recall.cache.ThreadSafeCache;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.springframework.context.ApplicationListener;
+
+/**
+ * Event listener that ensures ThreadSafeCache is fully initialized
+ * after the application context is refreshed.
+ */
+public class ContextRefreshedEventListener implements ApplicationListener<ContextRefreshedEvent> {
+    
+    private static final Log LOGGER = LogFactory.getLog(ContextRefreshedEventListener.class);
+    
+    private ThreadSafeCache threadSafeCache;
+    
+    @Override
+    public void onApplicationEvent(ContextRefreshedEvent event) {
+        LOGGER.info("Application context refreshed, ensuring ThreadSafeCache is initialized");
+        
+        if (threadSafeCache != null) {
+            if (!threadSafeCache.isInitialized()) {
+                LOGGER.info("ThreadSafeCache not initialized yet, initializing now");
+                threadSafeCache.initialize();
+            } else {
+                LOGGER.info("ThreadSafeCache already initialized");
+            }
+        } else {
+            LOGGER.error("ThreadSafeCache reference is null, cannot ensure initialization");
+        }
+    }
+    
+    public void setThreadSafeCache(ThreadSafeCache threadSafeCache) {
+        this.threadSafeCache = threadSafeCache;
+    }
+}
+
+<!-- Add ThreadSafeCache as a dependency of HAAmpsClient beans -->
+<bean id="threadSafeCache" class="com.baml.gdot.recall.cache.ThreadSafeCache" lazy-init="false" depends-on="omsTicketRequestNvFixAmpsClient,omsResponseRecoveryNvFixAmpsClient">
+    <constructor-arg index="0" ref="omsTicketRequestNvFixAmpsClient"/>
+    <constructor-arg index="1" ref="omsResponseRecoveryNvFixAmpsClient"/>
+    <constructor-arg index="2" ref="orderFixMessageTransformer"/>
+    <constructor-arg index="3" ref="omsToRecallSowConfig"/>
+    <constructor-arg index="4" ref="ticketSowConfig"/>
+    <property name="timeout" value="1000" />
+    <property name="recallTicketTopicName" value="${recall.ticket.amps.topic}"/>
+    <property name="recallToOmsTopicName" value="${recall.oms.request.amps.topic}" />
+    <property name="omsToRecallTopicName" value="${recall.oms.response.amps.topic}" />
+</bean>
+
+<!-- Add initialization-completion listener bean -->
+<bean id="cacheInitializationListener" class="org.springframework.context.event.ContextRefreshedEventListener">
+    <property name="threadSafeCache" ref="threadSafeCache"/>
+</bean>
